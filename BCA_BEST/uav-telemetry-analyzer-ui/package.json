@@ -1,0 +1,8 @@
+{
+  "name": "monorepo",
+  "private": true,
+  "workspaces": [
+    "cords-optimizator/pkg",
+    "web"
+  ]
+}
