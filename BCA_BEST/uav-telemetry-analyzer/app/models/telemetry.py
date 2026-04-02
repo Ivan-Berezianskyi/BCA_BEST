@@ -25,10 +25,10 @@ class FlightMetrics(BaseModel):
     duration: float
     
 class ENUCoordinate(BaseModel):
-    e: float # East
-    n: float # North
-    u: float # Up
-    color: Optional[str] = None # Based on speed/time
+    e: float # East (метри)
+    n: float # North (метри)
+    u: float # Up (метри)
+    speed: float # Швидкість (м/с) - для колорування на фронтенді
 
 class FlightAnalysisResponse(BaseModel):
     filename: str

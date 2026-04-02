@@ -1,0 +1,44 @@
+{
+  "filename": "data/binaryfiles/00000001.BIN",
+  "metrics": {
+    "max_horizontal_speed": 287.858023339563,
+    "max_vertical_speed": 114.45500183105469,
+    "max_acceleration": 82.84250423295461,
+    "max_altitude_gain": 1602.99,
+    "total_distance": 1259.1037467392648,
+    "duration": 52.199884000000004
+  },
+  "trajectory_points": 262,
+  "sample_points": [
+    {
+      "e": -0.0,
+      "n": 0.0,
+      "u": 0.0,
+      "speed": 0.0
+    },
+    {
+      "e": -0.0,
+      "n": 0.0,
+      "u": 0.0,
+      "speed": 1.8435278047200703
+    },
+    {
+      "e": -0.0,
+      "n": 0.0,
+      "u": 0.0,
+      "speed": 3.686951516625266
+    },
+    {
+      "e": -0.0,
+      "n": 0.0,
+      "u": 0.0,
+      "speed": 5.530273198543052
+    },
+    {
+      "e": -0.0,
+      "n": 0.0,
+      "u": 0.0,
+      "speed": 7.373535084457363
+    }
+  ]
+}
