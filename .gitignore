@@ -1,1 +1,6 @@
 **/.DS_Store
+BCA_BEST/uav-telemetry-analyzer/.env
+BCA_BEST/uav-telemetry-analyzer/imu.csv
+BCA_BEST/uav-telemetry-analyzer/pos.csv
+BCA_BEST/uav-telemetry-analyzer/out.csv
+BCA_BEST/uav-telemetry-analyzer/res_res.csv

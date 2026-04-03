@@ -8,7 +8,7 @@ type PlotlyModule = {
 
 const selectedFile = ref<File | null>(null)
 const processing = ref(false)
-const epsilon = ref(0.985)
+const keepRatio = ref(1)
 const progressLabel = ref('Awaiting binary input')
 const parsedPoints = ref(0)
 const optimizedPoints = ref(0)
@@ -40,29 +40,33 @@ async function ensureRuntime() {
   }
 }
 
-async function createLoopbackResponse(file: File): Promise<Response> {
-  const bytes = new Uint8Array(await file.arrayBuffer())
-  let offset = 0
+async function requestBackendResponse(file: File): Promise<Response> {
+  const form = new FormData()
+  form.append('file', file, file.name)
 
-  const stream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (offset >= bytes.length) {
-        controller.close()
-        return
+  const response = await fetch('http://127.0.0.1:8000/analyze/bin', {
+    method: 'POST',
+    body: form
+  })
+
+  if (!response.ok) {
+    let detail = response.statusText
+    try {
+      const payload = await response.json() as { detail?: string }
+      if (payload?.detail) {
+        detail = payload.detail
       }
-
-      const chunkSize = Math.min(bytes.length - offset, 2048 + Math.floor(Math.random() * 4096))
-      const next = bytes.subarray(offset, offset + chunkSize)
-      offset += chunkSize
-      controller.enqueue(next)
+    } catch {
+      const text = await response.text()
+      if (text) {
+        detail = text
+      }
     }
-  })
 
-  return new Response(stream, {
-    headers: {
-      'content-type': 'application/octet-stream'
-    }
-  })
+    throw new Error(`Backend request failed (${response.status}): ${detail}`)
+  }
+
+  return response
 }
 
 function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
@@ -113,6 +117,38 @@ function getMinMax(values: number[]) {
   }
 
   return { min, max }
+}
+
+function resampleFlattened(flattened: Float32Array, targetPoints: number): Float32Array {
+  const totalPoints = flattened.length / 4
+  if (targetPoints >= totalPoints) {
+    return flattened.slice()
+  }
+
+  const clampedTarget = Math.max(2, targetPoints)
+  const out = new Float32Array(clampedTarget * 4)
+  const step = (totalPoints - 1) / (clampedTarget - 1)
+
+  let prevIdx = -1
+  for (let i = 0; i < clampedTarget; i++) {
+    let idx = Math.round(i * step)
+    if (idx <= prevIdx) {
+      idx = prevIdx + 1
+    }
+    if (idx > totalPoints - 1) {
+      idx = totalPoints - 1
+    }
+
+    const srcStart = idx * 4
+    const dstStart = i * 4
+    out[dstStart] = flattened[srcStart]!
+    out[dstStart + 1] = flattened[srcStart + 1]!
+    out[dstStart + 2] = flattened[srcStart + 2]!
+    out[dstStart + 3] = flattened[srcStart + 3]!
+    prevIdx = idx
+  }
+
+  return out
 }
 
 async function drawChart(flattened: Float32Array) {
@@ -176,7 +212,7 @@ async function processFile() {
 
   processing.value = true
   errorMessage.value = ''
-  progressLabel.value = 'Preparing loopback backend stream'
+  progressLabel.value = 'Uploading file to backend'
   parsedPoints.value = 0
   optimizedPoints.value = 0
   bytesRead.value = 0
@@ -186,7 +222,7 @@ async function processFile() {
   try {
     await ensureRuntime()
 
-    const response = await createLoopbackResponse(selectedFile.value)
+    const response = await requestBackendResponse(selectedFile.value)
     if (!response.body) {
       throw new Error('Readable stream is not available in this browser')
     }
@@ -199,7 +235,7 @@ async function processFile() {
     let floatsWritten = 0
     let wasmFloatBuffer: Float32Array | null = null
 
-    progressLabel.value = 'Streaming binary payload and writing into WASM memory'
+    progressLabel.value = 'Receiving backend stream and writing into WASM memory'
 
     while (true) {
       const { done, value } = await reader.read()
@@ -258,9 +294,20 @@ async function processFile() {
       throw new Error(`Unexpected payload length. Expected ${expectedFloatCount} floats, received ${floatsWritten}`)
     }
 
-    progressLabel.value = 'Running optimizer in WASM and rendering plot'
+    progressLabel.value = 'Running optimization and rendering plot'
 
-    const optimized = session.optimize_cords(epsilon.value)
+    if (!wasmFloatBuffer || totalElements === null) {
+      throw new Error('Input buffer was not prepared')
+    }
+
+    const original = wasmFloatBuffer.slice(0, expectedFloatCount)
+    const coarse = session.optimize_cords(0.9999)
+
+    const targetPoints = Math.max(2, Math.round(totalElements * keepRatio.value))
+    const coarseCount = coarse.length / 4
+    const source = targetPoints <= coarseCount ? coarse : original
+    const optimized = resampleFlattened(source, targetPoints)
+
     optimizedPoints.value = optimized.length / 4
     await drawChart(optimized)
     progressLabel.value = 'Completed'
@@ -282,13 +329,13 @@ onBeforeUnmount(() => {
 
 <template>
   <ClientOnly>
-    <UContainer>
+    <UContainer class="">
       <section class="hero">
-        <p>Cord Optimizer Pipeline</p>
+        <p>Backend + WASM Pipeline</p>
         <h1>Binary stream to optimized 3D trajectory</h1>
         <p>
-          Input format: first 4 bytes as <strong>u32 count</strong>, then repeating
-          <strong>[f32 x, f32 y, f32 h, f32 s]</strong> blocks. The page emulates backend loopback and streams data directly into WASM memory.
+          Upload ArduPilot log <strong>.BIN</strong>. Backend parses telemetry and returns
+          stream format <strong>u32 count + [f32 x, f32 y, f32 h, f32 s]</strong>, then the client optimizes points in WASM.
         </p>
       </section>
 
@@ -302,20 +349,20 @@ onBeforeUnmount(() => {
 
         <div class="panel__body">
           <UFileUpload
-            accept=".bin,application/octet-stream"
+            accept=".BIN,.bin,application/octet-stream"
             :model-value="selectedFile"
-            label="Drop .bin payload"
-            description="Structure: u32 totalElements + totalElements * 4 f32 values"
+            label="Drop ArduPilot .BIN log"
+            description="Backend parses GPS/IMU and returns trajectory payload"
             class="upload"
             @update:model-value="onFileChange"
           />
 
           <div class="epsilon-row">
             <div>
-              <p class="epsilon-row__label">Optimization epsilon</p>
-              <p class="epsilon-row__value">{{ epsilon.toFixed(3) }}</p>
+              <p class="epsilon-row__label">Optimization (keep ratio)</p>
+              <p class="epsilon-row__value">{{ (keepRatio * 100).toFixed(1) }}%</p>
             </div>
-            <USlider v-model="epsilon" :min="0" :max="1" :step="0.01" tooltip class="epsilon-row__slider" />
+            <USlider v-model="keepRatio" :min="0.02" :max="1" :step="0.001" tooltip class="epsilon-row__slider" />
           </div>
 
           <UButton :disabled="!canProcess" :loading="processing" size="lg" @click="processFile">
