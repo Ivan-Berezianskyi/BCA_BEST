@@ -282,7 +282,7 @@ onBeforeUnmount(() => {
 
 <template>
   <ClientOnly>
-    <UContainer class="">
+    <UContainer>
       <section class="hero">
         <p>Cord Optimizer Pipeline</p>
         <h1>Binary stream to optimized 3D trajectory</h1>
@@ -315,7 +315,7 @@ onBeforeUnmount(() => {
               <p class="epsilon-row__label">Optimization epsilon</p>
               <p class="epsilon-row__value">{{ epsilon.toFixed(3) }}</p>
             </div>
-            <USlider v-model="epsilon" :min="0" :max="1" :step="0.001" tooltip class="epsilon-row__slider" />
+            <USlider v-model="epsilon" :min="0" :max="1" :step="0.01" tooltip class="epsilon-row__slider" />
           </div>
 
           <UButton :disabled="!canProcess" :loading="processing" size="lg" @click="processFile">

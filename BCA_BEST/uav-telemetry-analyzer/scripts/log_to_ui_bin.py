@@ -26,71 +26,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.services.analytics import TelemetryAnalytics
 
 
-class ScriptTelemetryAnalytics(TelemetryAnalytics):
-    """TelemetryAnalytics variant with robust local ECEF->ENU conversion."""
-
-    def _create_enu_cords(self):
-        lat_deg = self.pos_data["lat"].to_numpy(dtype=np.float64)
-        lon_deg = self.pos_data["lon"].to_numpy(dtype=np.float64)
-        alt_m = self.pos_data["alt"].to_numpy(dtype=np.float64)
-
-        lat = np.deg2rad(lat_deg)
-        lon = np.deg2rad(lon_deg)
-
-        # WGS84 ellipsoid constants.
-        a = 6378137.0
-        f = 1.0 / 298.257223563
-        e2 = f * (2.0 - f)
-
-        sin_lat = np.sin(lat)
-        cos_lat = np.cos(lat)
-        sin_lon = np.sin(lon)
-        cos_lon = np.cos(lon)
-
-        N = a / np.sqrt(1.0 - e2 * sin_lat**2)
-
-        x = (N + alt_m) * cos_lat * cos_lon
-        y = (N + alt_m) * cos_lat * sin_lon
-        z = (N * (1.0 - e2) + alt_m) * sin_lat
-
-        lat0 = lat[0]
-        lon0 = lon[0]
-        alt0 = alt_m[0]
-
-        sin_lat0 = np.sin(lat0)
-        cos_lat0 = np.cos(lat0)
-        sin_lon0 = np.sin(lon0)
-        cos_lon0 = np.cos(lon0)
-
-        N0 = a / np.sqrt(1.0 - e2 * sin_lat0**2)
-        x0 = (N0 + alt0) * cos_lat0 * cos_lon0
-        y0 = (N0 + alt0) * cos_lat0 * sin_lon0
-        z0 = (N0 * (1.0 - e2) + alt0) * sin_lat0
-
-        dx = x - x0
-        dy = y - y0
-        dz = z - z0
-
-        e = -sin_lon0 * dx + cos_lon0 * dy
-        n = -sin_lat0 * cos_lon0 * dx - sin_lat0 * sin_lon0 * dy + cos_lat0 * dz
-        u = cos_lat0 * cos_lon0 * dx + cos_lat0 * sin_lon0 * dy + sin_lat0 * dz
-
-        self.pos_data["E_m"] = e
-        self.pos_data["N_m"] = n
-        self.pos_data["U_m"] = u
-
-    def _synchronize_imu_nearest(self):
-        pos_idx = self.pos_data.set_index("timeS")
-        imu_idx = self.imu_data.set_index("timeS")
-
-        # Avoid duplicate non-index columns during join.
-        imu_idx = imu_idx.drop(columns=["timeUS"], errors="ignore")
-
-        combined = pos_idx.join(imu_idx, how="outer")
-        combined = combined.sort_index().interpolate(method="index")
-        self.res = combined.dropna(subset=["lat"]).reset_index()
-
-
 def _pick_first(data: dict[str, Any], keys: tuple[str, ...]) -> float | None:
     for key in keys:
         value = data.get(key)
@@ -244,12 +179,13 @@ def build_ui_payload(analytics: TelemetryAnalytics) -> pd.DataFrame:
             "x": data["E_m"],
             "y": data["N_m"],
             "h": data["U_m"],
-            "s": data["v"],
+            "s": data["v_g"],
         }
     )
 
     payload = payload.replace([np.inf, -np.inf], np.nan).dropna()
     payload.to_csv("./out.csv")
+    print(analytics.get_stats())
 
     if payload.empty:
         raise RuntimeError("Payload is empty after cleanup.")

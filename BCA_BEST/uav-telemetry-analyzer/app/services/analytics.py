@@ -3,6 +3,7 @@ import pandas as pd
 import pyproj
 from scipy.spatial.transform import Rotation
 from scipy.integrate import cumulative_trapezoid
+from scipy.signal import detrend
 from ahrs.filters import Madgwick
 
 #DataFrame["pos"] - gps data format [timeUS, lat, lon, alt]
@@ -15,7 +16,6 @@ class TelemetryAnalytics:
     def __init__(self, pos_data: pd.DataFrame, imu_data: pd.DataFrame):
         self.res = pd.DataFrame()
         self.pos_data = pos_data
-        self.pos_data[['lat', 'lon', 'alt']] = self.pos_data[['lat', 'lon', 'alt']].replace(0.0, np.nan).ffill()
 
         self.pos_data["timeS"] = self.pos_data["timeUS"]/1_000_000
 
@@ -31,19 +31,15 @@ class TelemetryAnalytics:
         self.pos_sampling_rate_hertz = len(pos_data)/(pos_data['timeS'].iloc[-1] - pos_data['timeS'].iloc[0])
 
         self._filter_gps_outliers()
-
-        print(1)
-        self._calculate_gyro_quanterions()
-        print(2)
-        self._prepare_imu_acceleration()
-        print(3)
-        self._calculate_speed_vector()
-        print(4)
         self._create_enu_cords()
-        print(5)
+        self._filter_enu_outliners_by_speed()
+
+        self._haversine()
+        self._calculate_gyro_quanterions()
+        self._prepare_imu_acceleration()
+        self._calculate_speed_vector()
+
         self._synchronize_imu_nearest()
-        print(6)
-        self.res["v"] = np.sqrt(np.pow(self.res["v_x"],2)+np.pow(self.res["v_y"],2)+np.pow(self.res["v_z"],2))
 
 
     def _calculate_gyro_quanterions(self):
@@ -65,30 +61,41 @@ class TelemetryAnalytics:
         rotations = Rotation.from_quat(qs)
 
         acc_vectors = self.imu_data[['a_x', 'a_y', 'a_z']].to_numpy(copy=True)
-
         rotated_acc = rotations.apply(acc_vectors)
 
         self.imu_data[['a_x_global', 'a_y_global', 'a_z_global']] = rotated_acc
+        self.imu_data['a_z_global'] -= 9.81
 
-        self.imu_data['a_z_global'] -= 9.8
+        self.imu_data['a_x_clean'] = detrend(self.imu_data['a_x_global'], type='linear')
+        self.imu_data['a_y_clean'] = detrend(self.imu_data['a_y_global'], type='linear')
+        self.imu_data['a_z_clean'] = detrend(self.imu_data['a_z_global'], type='linear')
+
+
 
     #integrates global acceleration for creating speed vector ( will be used to determine max horizontal and vertical speed)
     def _calculate_speed_vector(self):
-        self.imu_data['v_x'] = cumulative_trapezoid(self.imu_data['a_x_global'], self.imu_data['timeS'], initial=0)
-        self.imu_data['v_y'] = cumulative_trapezoid(self.imu_data['a_y_global'], self.imu_data['timeS'], initial=0)
-        self.imu_data['v_z'] = cumulative_trapezoid(self.imu_data['a_z_global'], self.imu_data['timeS'], initial=0)
+        self.imu_data['v_x'] = cumulative_trapezoid(self.imu_data['a_x_clean'], self.imu_data['timeS'], initial=0)
+        self.imu_data['v_y'] = cumulative_trapezoid(self.imu_data['a_y_clean'], self.imu_data['timeS'], initial=0)
+        self.imu_data['v_z'] = cumulative_trapezoid(self.imu_data['a_z_clean'], self.imu_data['timeS'], initial=0)
         
-    def _haversine(self, lat1, lon1, lat2, lon2):
-        R = 6371000.0  # Earth radius in meters
+
+        self.imu_data['v_h'] = np.sqrt(self.imu_data['v_x']**2 + self.imu_data['v_y']**2)
+        self.imu_data['v_g'] = np.sqrt(self.imu_data['v_h']**2 + self.imu_data['v_z']**2)
         
-        dlat = lat2 - lat1
-        dlon = lon2 - lon1
+    def _haversine(self):
+        window = max(3, int(self.pos_sampling_rate_hertz * 0.5))
+        lat_smooth = self.pos_data['lat_rad'].rolling(window=window, center=True, min_periods=1).mean()
+        lon_smooth = self.pos_data['lon_rad'].rolling(window=window, center=True, min_periods=1).mean()
+
+        R = 6371000.0  # Радіус Землі в метрах
         
-        a = np.sin(dlat / 2.0)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0)**2
+        dlat = lat_smooth.diff()
+        dlon = lon_smooth.diff()
+        
+        a = np.sin(dlat / 2.0)**2 + np.cos(lat_smooth.shift(1)) * np.cos(lat_smooth) * np.sin(dlon / 2.0)**2
         c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
         
-        distance = R * c
-        return distance
+        self.pos_data['s'] = R * c
 
     def _synchronize_imu_nearest(self):
         pos = self.pos_data.sort_values("timeS")
@@ -98,84 +105,92 @@ class TelemetryAnalytics:
             pos,
             imu,
             on="timeS",
-            direction="nearest",   # або "backward" / "forward"
-            tolerance=0.05,        # секунди — якщо IMU далі ніж 50мс → NaN
+            direction="nearest",
+            tolerance=0.05,
         )
 
+    #fixes gps errors
+    #takes median of window (5s or 5el), then compare diff and if larger 0.005 (~500m at Ukraine's latitudes) removes it
     def _filter_gps_outliers(self):
-        # Визначаємо розмір вікна для згладжування (~5 секунд)
         window = max(5, int(self.pos_sampling_rate_hertz * 5))
         
-        # Знаходимо "нормальну" траєкторію через ковзну медіану
         rolling_lat = self.pos_data['lat'].rolling(window=window, center=True, min_periods=1).median()
         rolling_lon = self.pos_data['lon'].rolling(window=window, center=True, min_periods=1).median()
         
-        # Рахуємо відхилення поточної точки від локальної медіани (в градусах)
         lat_diff = np.abs(self.pos_data['lat'] - rolling_lat)
         lon_diff = np.abs(self.pos_data['lon'] - rolling_lon)
         
-        # 0.005 градуса — це приблизно 500 метрів. 
-        # Якщо дрон "стрибнув" на >500м від своєї поточної траєкторії — це глітч.
         mask = (lat_diff < 0.005) & (lon_diff < 0.005)
         
-        # Залишаємо тільки хороші точки і оновлюємо датафрейм
         old_len = len(self.pos_data)
         self.pos_data = self.pos_data[mask].reset_index(drop=True)
-        
-        print(f"Відфільтровано глітчів GPS: {old_len - len(self.pos_data)}")
+
+    #filters bad records by mesuring speed
+    def _filter_enu_outliners_by_speed(self, max_speed_ms=120.0):
+        dt = self.pos_data["timeS"].diff()
+        de = self.pos_data["E_m"].diff()
+        dn = self.pos_data["N_m"].diff()
+        du = self.pos_data["U_m"].diff()
+
+        speed = np.sqrt(de**2 + dn**2 + du**2) / dt
+
+        mask = (speed < max_speed_ms) | (dt > 2.0)
+        mask = mask.fillna(True)
+
+        old_len = len(self.pos_data)
+        self.pos_data = self.pos_data[mask].reset_index(drop=True)
     
     def _create_enu_cords(self):
-        a = 6378137.0
-        e_sq = 0.00669437999014
+        lat0 = self.pos_data['lat_rad'].iloc[0]
+        lon0 = self.pos_data['lon_rad'].iloc[0]
+        alt0 = self.pos_data['alt'].iloc[0]
 
-        # ---------------------------------------------------------
-        # РОЗУМНИЙ ПОШУК ТОЧКИ ВІДЛІКУ (БЕЗ "ХОЛОДНОГО СТАРТУ")
-        # ---------------------------------------------------------
-        # 1. Знаходимо медіану всіх координат у радіанах (це центр нашого реального польоту)
-        median_lat = self.pos_data['lat_rad'].median()
-        median_lon = self.pos_data['lon_rad'].median()
+        pipeline = (
+            f"+proj=pipeline "
+            f"+step +proj=cart +ellps=WGS84 "
+            f"+step +proj=topocentric +ellps=WGS84 +lat_0={lat0} +lon_0={lon0} +h_0={alt0}"
+        )
+        
+        transformer = pyproj.Transformer.from_pipeline(pipeline)
 
-        # 2. Відфільтровуємо аномалії. Залишаємо тільки ті точки, які знаходяться 
-        # ближче ніж ~0.1 радіана (це приблизно 600 км) від медіани.
-        # Це гарантовано відкине "нульові" острови та кеш з минулих польотів.
-        valid_pos = self.pos_data[
-            (np.abs(self.pos_data['lat_rad'] - median_lat) < 0.1) &
-            (np.abs(self.pos_data['lon_rad'] - median_lon) < 0.1)
-        ]
+        e, n, u = transformer.transform(
+            self.pos_data["lon_rad"].values,
+            self.pos_data["lat_rad"].values,
+            self.pos_data["alt"].values,
+        )
 
-        # 3. Тепер безпечно беремо ПЕРШУ валідну точку як Origin для ENU
-        lat0 = valid_pos['lat_rad'].iloc[0]
-        lon0 = valid_pos['lon_rad'].iloc[0]
-        alt0 = valid_pos['alt'].iloc[0]
-        # ---------------------------------------------------------
+        self.pos_data["E_m"] = e
+        self.pos_data["N_m"] = n
+        self.pos_data["U_m"] = u
 
-        lat = self.pos_data['lat_rad']
-        lon = self.pos_data['lon_rad']
-        alt = self.pos_data['alt']
+    def get_stats(self) -> dict:
+        max_speed = self.res['v_g'].max()
+        max_vertical_speed = self.res['v_z'].max()
+        max_horizontal_speed = np.sqrt(self.res['v_x']**2 + self.res['v_y']**2).max()
 
-        # Крок 1: Перетворення WGS84 -> ECEF для всіх точок
-        N = a / np.sqrt(1 - e_sq * np.sin(lat)**2)
-        X = (N + alt) * np.cos(lat) * np.cos(lon)
-        Y = (N + alt) * np.cos(lat) * np.sin(lon)
-        Z = (N * (1 - e_sq) + alt) * np.sin(lat)
+        max_acceleration = np.sqrt(self.res['a_x_global']**2 + self.res['a_y_global']**2 + self.res['a_z_global']**2).max()
+        max_vertical_acceleration = self.res['a_z_global'].max()
+        max_horizontal_acceleration = np.sqrt(self.res['a_x_global']**2 + self.res['a_y_global']**2).max()
 
-        # Перетворення WGS84 -> ECEF для точки відліку (Origin)
-        N0 = a / np.sqrt(1 - e_sq * np.sin(lat0)**2)
-        X0 = (N0 + alt0) * np.cos(lat0) * np.cos(lon0)
-        Y0 = (N0 + alt0) * np.cos(lat0) * np.sin(lon0)
-        Z0 = (N0 * (1 - e_sq) + alt0) * np.sin(lat0)
+        max_clean_acceleration = np.sqrt(self.res['a_x_clean']**2 + self.res['a_y_clean']**2 + self.res['a_z_clean']**2).max()
+        max_vertical_clean_acceleration = self.res['a_z_clean'].max()
+        max_horizontal_clean_acceleration = np.sqrt(self.res['a_x_clean']**2 + self.res['a_y_clean']**2).max()
 
-        # Вектор різниці в ECEF
-        dX = X - X0
-        dY = Y - Y0
-        dZ = Z - Z0
+        max_height = self.res['alt'].max()
+        total_distance = self.res['s'].sum()
 
-        # Крок 2: Перетворення ECEF -> ENU
-        sin_lat0 = np.sin(lat0)
-        cos_lat0 = np.cos(lat0)
-        sin_lon0 = np.sin(lon0)
-        cos_lon0 = np.cos(lon0)
-
-        self.pos_data['E_m'] = -sin_lon0 * dX + cos_lon0 * dY
-        self.pos_data['N_m'] = -sin_lat0 * cos_lon0 * dX - sin_lat0 * sin_lon0 * dY + cos_lat0 * dZ
-        self.pos_data['U_m'] = cos_lat0 * cos_lon0 * dX + cos_lat0 * sin_lon0 * dY + sin_lat0 * dZ
+        total_time = self.res['timeS'].iloc[-1] - self.res['timeS'].iloc[0]
+        return {
+            "max_speed_ms": max_speed,
+            "max_horizontal_speed_ms": max_horizontal_speed,
+            "max_vertical_speed_ms": max_vertical_speed,
+            "max_acceleration_ms2": max_acceleration,
+            "max_horizontal_acceleration_ms2": max_horizontal_acceleration,
+            "max_vertical_acceleration_ms2": max_vertical_acceleration,
+            "max_clean_acceleration_ms2": max_clean_acceleration,
+            "max_horizontal_clean_acceleration_ms2": max_horizontal_clean_acceleration,
+            "max_vertical_clean_acceleration_ms2": max_vertical_clean_acceleration,
+            "max_height_m": max_height,
+            "total_distance_m": total_distance,
+            "total_time_s": total_time
+        }

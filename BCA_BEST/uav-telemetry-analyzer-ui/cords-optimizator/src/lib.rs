@@ -34,17 +34,23 @@ impl DataSession {
         self.buffer.as_ptr()
     }
 
-    fn create_vector(&self, element_index: usize) -> Vector {
-        let vec_start = (element_index - 1) * 4;
-        let vec_end = element_index * 4;
+    fn create_vector(&self, start_idx: usize, end_idx: usize) -> Vector {
+        let vec_start = start_idx * POINT_SIZE;
+        let vec_end = end_idx * POINT_SIZE;
 
         let x = self.buffer[vec_end] - self.buffer[vec_start];
         let y = self.buffer[vec_end + 1] - self.buffer[vec_start + 1];
         let h = self.buffer[vec_end + 2] - self.buffer[vec_start + 2];
 
-        let mut length = (x * x + y * y + h * h).sqrt();
+        let length = (x * x + y * y + h * h).sqrt();
 
-        if length < 1e-6 { length = 0.0 }
+        if length < 1e-6 {
+            return Vector {
+                x: 0.0,
+                y: 0.0,
+                h: 0.0,
+            };
+        }
 
         Vector {
             x: x / length,
@@ -53,33 +59,45 @@ impl DataSession {
         }
     }
 
-    fn get_product(&self, element_index: usize) -> f32 {
-        if element_index <= 1 || element_index >= self.size {
-            return 0.0;
-        }
-
-        let vector_a = self.create_vector(element_index - 1);
-        let vector_b = self.create_vector(element_index);
-
+    fn get_product(&self, vector_a: &Vector, vector_b: &Vector) -> f32 {
         return vector_a.x * vector_b.x + vector_a.y * vector_b.y + vector_a.h * vector_b.h;
     }
 
     pub fn optimize_cords(&self, epsilon: f32) -> Vec<f32> {
         let mut res: Vec<f32> = Vec::new();
 
-        res.extend_from_slice(&self.buffer[0..(POINT_SIZE)]);
+        if self.size < 3 {
+            res.extend_from_slice(&self.buffer);
+            return res;
+        }
 
-        for i in 1..(self.size-1) {
-            if self.get_product(i).abs() < epsilon {
-                let data_start = i * POINT_SIZE;
-                res.extend_from_slice(&self.buffer[data_start..(data_start + POINT_SIZE)]);
+        // Зберігаємо першу точку
+        res.extend_from_slice(&self.buffer[0..POINT_SIZE]);
+
+        let mut last_kept_idx = 0; // індекс останньої збереженої точки
+        let mut v_prev = self.create_vector(0, 1);
+
+        for i in 1..self.size {
+            // Вектор від останньої збереженої точки до поточної
+            let v_curr = self.create_vector(last_kept_idx, i);
+
+            if v_curr.x == 0.0 && v_curr.y == 0.0 && v_curr.h == 0.0 {
+                continue;
+            }
+
+            let product = self.get_product(&v_prev, &v_curr);
+
+            let is_last = i == self.size - 1;
+
+            if product <= epsilon || is_last {
+                let start = i * POINT_SIZE;
+                res.extend_from_slice(&self.buffer[start..(start + POINT_SIZE)]);
+
+                last_kept_idx = i;
+                v_prev = v_curr;
             }
         }
 
-        if self.size > 1 {
-            res.extend_from_slice(&self.buffer[self.buffer.len()-POINT_SIZE..(self.buffer.len())]);
-        }
-
-        return res;
+        res
     }
 }
