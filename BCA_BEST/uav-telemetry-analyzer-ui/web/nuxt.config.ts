@@ -11,4 +11,8 @@ export default defineNuxtConfig({
       tailwindcss(),
     ],
   },
+  ssr: false,
+  routeRules: {
+    '/': { prerender: true }
+  }
 })

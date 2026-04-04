@@ -1,6 +1,9 @@
+import json
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from app.services.parser import TelemetryParser
 from app.services.analytics import TelemetryAnalytics
 from app.services.ai_engine import AIEngine
@@ -28,8 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-def _build_binary_payload(analytics: TelemetryAnalytics) -> bytes:
+def _build_combined_payload(analytics: TelemetryAnalytics, metrics: dict, ai_summary: str) -> bytes:
     if analytics.res.empty:
         raise RuntimeError("Synchronized telemetry table is empty")
 
@@ -39,81 +41,45 @@ def _build_binary_payload(analytics: TelemetryAnalytics) -> bytes:
 
     points = frame.to_numpy(dtype="<f4", copy=True)
     count = int(points.shape[0])
-    return struct.pack("<I", count) + points.tobytes(order="C")
+    
+    binary_points = struct.pack("<I", count) + points.tobytes(order="C")
+
+    metadata = {
+        "filename": analytics.filename if hasattr(analytics, 'filename') else "telemetry.bin",
+        "metrics": metrics,
+        "ai_summary": ai_summary
+    }
+    json_bytes = json.dumps(metadata).encode("utf-8")
+    json_length = len(json_bytes)
+
+    header = struct.pack("<I", json_length)
+
+    return header + json_bytes + binary_points
 
 
-def _build_json_trajectory(analytics: TelemetryAnalytics) -> list[dict[str, float]]:
-    if analytics.res.empty:
-        return []
-
-    frame = analytics.res[["E_m", "N_m", "U_m", "v_g"]].replace([np.inf, -np.inf], np.nan).dropna()
-    trajectory: list[dict[str, float]] = []
-    for row in frame.itertuples(index=False):
-        trajectory.append(
-            {
-                "x": float(row[0]),
-                "y": float(row[1]),
-                "h": float(row[2]),
-                "s": float(row[3]),
-            }
-        )
-    return trajectory
-
-@app.get("/")
-async def root():
-    return {"message": "UAV Telemetry Analyzer is running"}
-
-@app.post("/analyze")
-async def analyze_telemetry(file: UploadFile = File(...)):
+@app.post("/analyze/optimized")
+async def analyze_telemetry_optimized(file: UploadFile = File(...)):
     safe_name = os.path.basename(file.filename)
     temp_path = DATA_DIR / safe_name
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
     try:
-        # 1. Parse DataFlash .BIN file (Pymavlink)
         parser = TelemetryParser(str(temp_path))
         pos_data, imu_data = parser.parse()
-        
-        # 2. Run Analytics (Haversine, ENU, Trapezoidal Integration)
+
         analytics = TelemetryAnalytics(pos_data, imu_data)
         metrics = analytics.get_stats()
-        trajectory = _build_json_trajectory(analytics)
         
-        # 3. AI Insight
         ai = AIEngine()
         ai_summary = await ai.get_flight_summary(metrics)
         
-        return {
-            "filename": file.filename,
-            "metrics": metrics,
-            "trajectory": trajectory,
-            "ai_summary": ai_summary
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if temp_path.exists():
-            try:
-                temp_path.unlink()
-            except PermissionError:
-                pass
-
-
-@app.post("/analyze/bin")
-async def analyze_telemetry_bin(file: UploadFile = File(...)):
-    safe_name = os.path.basename(file.filename)
-    temp_path = DATA_DIR / safe_name
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    try:
-        parser = TelemetryParser(str(temp_path))
-        pos_data, imu_data = parser.parse()
-        analytics = TelemetryAnalytics(pos_data, imu_data)
-        payload = _build_binary_payload(analytics)
+        payload = _build_combined_payload(analytics, metrics, ai_summary)
+        
         return Response(content=payload, media_type="application/octet-stream")
+        
     except Exception as e:
+
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if temp_path.exists():
@@ -121,3 +87,21 @@ async def analyze_telemetry_bin(file: UploadFile = File(...)):
                 temp_path.unlink()
             except PermissionError:
                 pass
+
+
+
+FRONTEND_DIR = Path(__file__).parent / "frontend_dist"
+
+app.mount("/_nuxt", StaticFiles(directory=str(FRONTEND_DIR / "_nuxt")), name="nuxt_assets")
+app.mount("/_fonts", StaticFiles(directory=str(FRONTEND_DIR / "_fonts")), name="fonts_assets")
+
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse(FRONTEND_DIR / "favicon.ico")
+
+@app.get("/{catchall:path}")
+async def serve_frontend(catchall: str):
+    index_file = FRONTEND_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return {"error": "Frontend build not found"}

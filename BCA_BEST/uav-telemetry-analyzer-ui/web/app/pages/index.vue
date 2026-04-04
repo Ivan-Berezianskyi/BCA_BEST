@@ -1,392 +1,341 @@
 <script setup lang="ts">
-import initWasm, { DataSession } from 'cords-optimizator'
+import { ref, computed, onMounted, watch } from 'vue'
 
-type PlotlyModule = {
-  newPlot: (el: HTMLElement, data: unknown[], layout: Record<string, unknown>, config: Record<string, unknown>) => Promise<unknown>
-  purge: (el: HTMLElement) => void
-}
+const { isReady: isWasmReady, ensureRuntime: ensureWasm, initSession, applyReduction } = useWasmOptimizer()
+const { isUploading, bytesRead, error, streamToWasm } = useTelemetryApi()
+const { isPlotlyLoaded, ensurePlotly, drawChart, purgeChart } = usePlotly()
+
 
 const selectedFile = ref<File | null>(null)
-const processing = ref(false)
-const keepRatio = ref(1)
+const toleranceEpsilon = ref(0.2)
 const progressLabel = ref('Awaiting binary input')
-const parsedPoints = ref(0)
-const optimizedPoints = ref(0)
-const bytesRead = ref(0)
-const errorMessage = ref('')
+const importModalOpen = ref(false)
 const chartEl = ref<HTMLElement | null>(null)
 
-let plotly: PlotlyModule | null = null
-let wasmExports: Awaited<ReturnType<typeof initWasm>> | null = null
 
-const canProcess = computed(() => Boolean(selectedFile.value) && !processing.value)
+const metrics = ref<TelemetryMetrics | null>(null)
+const aiSummary = ref<string>('')
+
+
+const canProcess = computed(() => Boolean(selectedFile.value) && !isUploading.value)
+const toleranceLabel = computed(() => `${toleranceEpsilon.value.toFixed(2)} m`)
+const selectedFileName = computed(() => selectedFile.value?.name ?? 'No file selected')
+const selectedFileSize = computed(() => selectedFile.value ? formatBytes(selectedFile.value.size) : '0 B')
+
+const lockOverlayVisible = computed(() => !metrics.value && !isUploading.value && !importModalOpen.value)
+
+function formatBytes(value: number): string {
+  if (value <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let unitIndex = 0
+  let size = value
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+}
+
+function openImportModal() {
+  importModalOpen.value = true
+}
+
+function closeImportModal() {
+  importModalOpen.value = false
+}
 
 function onFileChange(value: File | null | File[] | undefined) {
-  if (Array.isArray(value)) {
-    selectedFile.value = value[0] ?? null
-    return
+  selectedFile.value = Array.isArray(value) ? (value[0] ?? null) : (value ?? null)
+
+  if (selectedFile.value) {
+    progressLabel.value = 'File selected. Ready to upload'
+  } else {
+    progressLabel.value = 'Awaiting binary input'
   }
-  selectedFile.value = value ?? null
-}
-
-async function ensureRuntime() {
-  if (!wasmExports) {
-    wasmExports = await initWasm()
-  }
-
-  if (!plotly) {
-    const mod = await import('plotly.js-dist-min')
-    plotly = mod.default as PlotlyModule
-  }
-}
-
-async function requestBackendResponse(file: File): Promise<Response> {
-  const form = new FormData()
-  form.append('file', file, file.name)
-
-  const response = await fetch('http://127.0.0.1:8000/analyze/bin', {
-    method: 'POST',
-    body: form
-  })
-
-  if (!response.ok) {
-    let detail = response.statusText
-    try {
-      const payload = await response.json() as { detail?: string }
-      if (payload?.detail) {
-        detail = payload.detail
-      }
-    } catch {
-      const text = await response.text()
-      if (text) {
-        detail = text
-      }
-    }
-
-    throw new Error(`Backend request failed (${response.status}): ${detail}`)
-  }
-
-  return response
-}
-
-function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
-  if (left.length === 0) {
-    return right.slice()
-  }
-
-  const joined = new Uint8Array(left.length + right.length)
-  joined.set(left)
-  joined.set(right, left.length)
-  return joined
-}
-
-function unpackOptimizedData(flattened: Float32Array) {
-  if (flattened.length % 4 !== 0) {
-    throw new Error('Optimizer output is corrupted: element stride must be 4 floats')
-  }
-
-  const pointsCount = flattened.length / 4
-  const x = new Array<number>(pointsCount)
-  const y = new Array<number>(pointsCount)
-  const z = new Array<number>(pointsCount)
-  const speed = new Array<number>(pointsCount)
-
-  for (let i = 0; i < pointsCount; i++) {
-    const start = i * 4
-    x[i] = flattened[start]!
-    y[i] = flattened[start + 1]!
-    z[i] = flattened[start + 2]!
-    speed[i] = flattened[start + 3]!
-  }
-
-  return { x, y, z, speed, pointsCount }
-}
-
-function getMinMax(values: number[]) {
-  if (values.length === 0) {
-    return { min: 0, max: 0 }
-  }
-
-  let min = values[0]!
-  let max = values[0]!
-
-  for (let i = 1; i < values.length; i++) {
-    const value = values[i]!
-    if (value < min) min = value
-    if (value > max) max = value
-  }
-
-  return { min, max }
-}
-
-function resampleFlattened(flattened: Float32Array, targetPoints: number): Float32Array {
-  const totalPoints = flattened.length / 4
-  if (targetPoints >= totalPoints) {
-    return flattened.slice()
-  }
-
-  const clampedTarget = Math.max(2, targetPoints)
-  const out = new Float32Array(clampedTarget * 4)
-  const step = (totalPoints - 1) / (clampedTarget - 1)
-
-  let prevIdx = -1
-  for (let i = 0; i < clampedTarget; i++) {
-    let idx = Math.round(i * step)
-    if (idx <= prevIdx) {
-      idx = prevIdx + 1
-    }
-    if (idx > totalPoints - 1) {
-      idx = totalPoints - 1
-    }
-
-    const srcStart = idx * 4
-    const dstStart = i * 4
-    out[dstStart] = flattened[srcStart]!
-    out[dstStart + 1] = flattened[srcStart + 1]!
-    out[dstStart + 2] = flattened[srcStart + 2]!
-    out[dstStart + 3] = flattened[srcStart + 3]!
-    prevIdx = idx
-  }
-
-  return out
-}
-
-async function drawChart(flattened: Float32Array) {
-  if (!chartEl.value || !plotly) {
-    return
-  }
-
-  const { x, y, z, speed } = unpackOptimizedData(flattened)
-  const { min: minSpeed, max: maxSpeed } = getMinMax(speed)
-
-  await plotly.newPlot(
-    chartEl.value,
-    [
-      {
-        type: 'scatter3d',
-        mode: 'lines+markers',
-        x,
-        y,
-        z,
-        marker: {
-          size: 4,
-          color: speed,
-          colorscale: 'Turbo',
-          cmin: minSpeed,
-          cmax: maxSpeed,
-          colorbar: { title: 'Speed (s)' }
-        },
-        line: {
-          color: speed,
-          colorscale: 'Turbo',
-          cmin: minSpeed,
-          cmax: maxSpeed,
-          width: 5
-        },
-        customdata: speed,
-        hovertemplate: 'x: %{x:.4f}<br>y: %{y:.4f}<br>h: %{z:.4f}<br>s: %{customdata:.4f}<extra></extra>'
-      }
-    ],
-    {
-      title: 'Optimized trajectory',
-      margin: { l: 0, r: 0, b: 0, t: 48 },
-      paper_bgcolor: 'rgba(0,0,0,0)',
-      plot_bgcolor: 'rgba(0,0,0,0)',
-      scene: {
-        xaxis: { title: 'X' },
-        yaxis: { title: 'Y' },
-        zaxis: { title: 'H' }
-      }
-    },
-    {
-      responsive: true,
-      displaylogo: false
-    }
-  )
 }
 
 async function processFile() {
-  if (!selectedFile.value) {
-    return
-  }
+  if (!selectedFile.value || isUploading.value) return
 
-  processing.value = true
-  errorMessage.value = ''
-  progressLabel.value = 'Uploading file to backend'
-  parsedPoints.value = 0
-  optimizedPoints.value = 0
-  bytesRead.value = 0
-
-  let session: DataSession | null = null
+  progressLabel.value = 'Streaming to backend and WASM...'
 
   try {
-    await ensureRuntime()
+    const { metadata } = await streamToWasm(selectedFile.value, initSession)
 
-    const response = await requestBackendResponse(selectedFile.value)
-    if (!response.body) {
-      throw new Error('Readable stream is not available in this browser')
-    }
+    metrics.value = metadata.metrics
+    aiSummary.value = metadata.aiSummary
 
-    const reader = response.body.getReader()
+    await renderTrajectory()
 
-    let carry = new Uint8Array(0)
-    let totalElements: number | null = null
-    let expectedFloatCount = 0
-    let floatsWritten = 0
-    let wasmFloatBuffer: Float32Array | null = null
-
-    progressLabel.value = 'Receiving backend stream and writing into WASM memory'
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) {
-        break
-      }
-
-      bytesRead.value += value.byteLength
-      let chunk = concatBytes(carry, value)
-      let cursor = 0
-
-      if (totalElements === null) {
-        if (chunk.byteLength < 4) {
-          carry = chunk.slice()
-          continue
-        }
-
-        const headerView = new DataView(chunk.buffer, chunk.byteOffset, 4)
-        totalElements = headerView.getUint32(0, true)
-        expectedFloatCount = totalElements * 4
-        session = new DataSession(totalElements)
-
-        const ptr = session.ptr()
-        wasmFloatBuffer = new Float32Array(wasmExports!.memory.buffer, ptr, expectedFloatCount)
-        parsedPoints.value = totalElements
-        cursor = 4
-      }
-
-      const bytesForFloats = chunk.byteLength - cursor
-      const completeFloatBytes = bytesForFloats - (bytesForFloats % 4)
-
-      if (completeFloatBytes > 0) {
-        const asFloats = new Float32Array(chunk.buffer, chunk.byteOffset + cursor, completeFloatBytes / 4)
-
-        if (!wasmFloatBuffer) {
-          throw new Error('WASM memory buffer was not allocated')
-        }
-
-        wasmFloatBuffer.set(asFloats, floatsWritten)
-        floatsWritten += asFloats.length
-        cursor += completeFloatBytes
-      }
-
-      carry = chunk.slice(cursor)
-    }
-
-    if (!session) {
-      throw new Error('No header found in stream (first 4 bytes with u32 count are required)')
-    }
-
-    if (carry.byteLength !== 0) {
-      throw new Error('Stream ended with incomplete float bytes')
-    }
-
-    if (floatsWritten !== expectedFloatCount) {
-      throw new Error(`Unexpected payload length. Expected ${expectedFloatCount} floats, received ${floatsWritten}`)
-    }
-
-    progressLabel.value = 'Running optimization and rendering plot'
-
-    if (!wasmFloatBuffer || totalElements === null) {
-      throw new Error('Input buffer was not prepared')
-    }
-
-    const original = wasmFloatBuffer.slice(0, expectedFloatCount)
-    const coarse = session.optimize_cords(0.9999)
-
-    const targetPoints = Math.max(2, Math.round(totalElements * keepRatio.value))
-    const coarseCount = coarse.length / 4
-    const source = targetPoints <= coarseCount ? coarse : original
-    const optimized = resampleFlattened(source, targetPoints)
-
-    optimizedPoints.value = optimized.length / 4
-    await drawChart(optimized)
     progressLabel.value = 'Completed'
-  } catch (error) {
+    closeImportModal()
+  } catch (err) {
     progressLabel.value = 'Failed'
-    errorMessage.value = error instanceof Error ? error.message : 'Unknown processing error'
-  } finally {
-    session?.free()
-    processing.value = false
+    console.error("Помилка обробки:", err)
   }
 }
 
-onBeforeUnmount(() => {
-  if (chartEl.value && plotly) {
-    plotly.purge(chartEl.value)
+async function renderTrajectory() {
+  if (!isWasmReady.value || !chartEl.value || !metrics.value) return
+
+  progressLabel.value = 'Optimizing trajectory...'
+
+  const optimizedFloats = applyReduction(toleranceEpsilon.value)
+
+  await drawChart(chartEl.value, optimizedFloats)
+
+  progressLabel.value = 'Visualization ready'
+}
+
+watch(toleranceEpsilon, () => {
+  if (metrics.value) {
+    renderTrajectory()
   }
+})
+
+
+onMounted(async () => {
+  await ensureWasm()
+  await ensurePlotly()
 })
 </script>
 
 <template>
   <ClientOnly>
-    <UContainer class="">
-      <section class="hero">
-        <p>Backend + WASM Pipeline</p>
-        <h1>Binary stream to optimized 3D trajectory</h1>
-        <p>
-          Upload ArduPilot log <strong>.BIN</strong>. Backend parses telemetry and returns
-          stream format <strong>u32 count + [f32 x, f32 y, f32 h, f32 s]</strong>, then the client optimizes points in WASM.
-        </p>
-      </section>
-
-      <UCard class="panel" variant="subtle">
-        <template #header>
+    <div class="dashboard-shell pb-8">
+      <header
+        class="mx-auto flex w-full max-w-350 flex-col gap-4 px-4 pt-6 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:pt-8">
+        <div class="flex items-center gap-3">
           <div>
-            <h2>Input</h2>
-            <UBadge :label="processing ? 'Processing' : 'Idle'" :color="processing ? 'info' : 'neutral'" variant="subtle" />
+            <p class="text-[2rem] font-extrabold leading-none tracking-tight text-white sm:text-[2.2rem]">UAV Telemetry
+              Analyzer</p>
+            <p class="text-sm text-(--text-muted)">ArduPilot log parser and 3D visualizer</p>
           </div>
-        </template>
-
-        <div class="panel__body">
-          <UFileUpload
-            accept=".BIN,.bin,application/octet-stream"
-            :model-value="selectedFile"
-            label="Drop ArduPilot .BIN log"
-            description="Backend parses GPS/IMU and returns trajectory payload"
-            class="upload"
-            @update:model-value="onFileChange"
-          />
-
-          <div class="epsilon-row">
-            <div>
-              <p class="epsilon-row__label">Optimization (keep ratio)</p>
-              <p class="epsilon-row__value">{{ (keepRatio * 100).toFixed(1) }}%</p>
-            </div>
-            <USlider v-model="keepRatio" :min="0.02" :max="1" :step="0.001" tooltip class="epsilon-row__slider" />
-          </div>
-
-          <UButton :disabled="!canProcess" :loading="processing" size="lg" @click="processFile">
-            Process Binary Data
-          </UButton>
         </div>
 
-        <template #footer>
-          <div class="stats">
-            <UBadge color="neutral" variant="outline">{{ progressLabel }}</UBadge>
-            <UBadge color="neutral" variant="outline">bytes read: {{ bytesRead }}</UBadge>
-            <UBadge color="success" variant="outline">input points: {{ parsedPoints }}</UBadge>
-            <UBadge color="info" variant="outline">optimized points: {{ optimizedPoints }}</UBadge>
+        <div class="team-pill">
+          <div class="flex h-7 w-7 items-center justify-center rounded-full bg-white/20 text-xs font-bold">BCA</div>
+          <div>
+            <p class="text-sm font-semibold text-white">BCA TEAM</p>
           </div>
-          <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
-        </template>
-      </UCard>
+        </div>
+      </header>
 
-      <UCard class="panel chart-panel" variant="outline">
-        <template #header>
-          <h2>Plotly 3D Scatter + Path</h2>
-        </template>
-        <div ref="chartEl" class="plot"></div>
-      </UCard>
-    </UContainer>
+      <main class="relative mx-auto mt-4 w-full max-w-350 px-4 sm:px-6">
+        <div class="glass-stage relative overflow-hidden rounded-3xl border border-white/15">
+          <div
+            class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_10%,rgba(57,81,181,0.14),transparent_46%),radial-gradient(circle_at_85%_5%,rgba(17,105,205,0.18),transparent_34%)]" />
+          <div ref="chartEl" class="dashboard-plot h-[52vh] min-h-90 w-full sm:min-h-115 lg:h-[68vh]" />
+        </div>
+
+        <section class="relative mt-4">
+          <div class="grid gap-4 transition-opacity duration-300 lg:grid-cols-4"
+            :class="lockOverlayVisible ? 'opacity-70' : 'opacity-100'">
+            <UCard class="glass-card min-h-64">
+              <template #header>
+                <div class="flex items-center justify-between">
+                  <h2 class="card-title">Mission Manager and Log Upload</h2>
+                </div>
+              </template>
+
+              <div class="space-y-4">
+                <UButton size="lg"
+                  class="w-full rounded-xl! bg-transparent! text-white! ring-1 ring-white/30 hover:bg-white/10!"
+                  @click="openImportModal">
+                  Upload New Log (.bin)
+                </UButton>
+
+                <div class="space-y-2 text-sm">
+                  <div class="flex justify-between gap-4 text-(--text-muted)">
+                    <span>Current file</span>
+                    <span class="max-w-[64%] truncate text-right text-white">{{ selectedFileName }}</span>
+                  </div>
+                  <div class="flex justify-between gap-4 text-(--text-muted)">
+                    <span>Size</span>
+                    <span class="text-white">{{ selectedFileSize }}</span>
+                  </div>
+                  <div class="flex justify-between gap-4 text-(--text-muted)">
+                    <span>Status</span>
+                    <span class="text-white">{{ progressLabel }}</span>
+                  </div>
+                  <div class="flex justify-between gap-4 text-(--text-muted)">
+                    <span>Duration</span>
+                    <span class="text-white">{{ 10 }}</span>
+                  </div>
+                </div>
+              </div>
+            </UCard>
+
+            <UCard class="glass-card min-h-64">
+              <template #header>
+                <h2 class="card-title">Key Metrics</h2>
+              </template>
+
+              <div class="space-y-2 text-sm">
+                <div class="flex justify-between gap-4 text-(--text-muted)">
+                  <span>Total Distance</span>
+                  <span class="font-semibold text-white">{{ (metrics?.totalDistanceM || 0).toFixed(2) }} m</span>
+                </div>
+                <div class="flex justify-between gap-4 text-(--text-muted)">
+                  <span>Max Altitude</span>
+                  <span class="font-semibold text-white">{{ (metrics?.maxHeightM || 0).toFixed(2) }} m</span>
+                </div>
+                <div class="flex justify-between gap-4 text-(--text-muted)">
+                  <span>Vertical Speed</span>
+                  <span class="font-semibold text-white">{{ (metrics?.maxVerticalSpeedMs || 0).toFixed(2) }} m/s</span>
+                </div>
+                <div class="flex justify-between gap-4 text-(--text-muted)">
+                  <span>Horizontal Speed</span>
+                  <span class="font-semibold text-white">{{ (metrics?.maxHorizontalSpeedMs || 0).toFixed(2) }}
+                    m/s</span>
+                </div>
+                <div class="flex justify-between gap-4 text-(--text-muted)">
+                  <span>Max Speed</span>
+                  <span class="font-semibold text-white">{{ (metrics?.maxSpeedMs || 0).toFixed(2) }} m/s</span>
+                </div>
+                <div class="flex justify-between gap-4 text-(--text-muted)">
+                  <span>Max Horizontal Acceleration</span>
+                  <span class="font-semibold text-white">{{ (metrics?.maxHorizontalCleanAccelerationMs2 || 0).toFixed(2)
+                    }}
+                    m/s²</span>
+                </div>
+                <div class="flex justify-between gap-4 text-(--text-muted)">
+                  <span>Max Vertical Acceleration</span>
+                  <span class="font-semibold text-white">{{ (metrics?.maxVerticalCleanAccelerationMs2 || 0).toFixed(2)
+                    }}
+                    m/s²</span>
+                </div>
+                <div class="flex justify-between gap-4 text-(--text-muted)">
+                  <span>Max Acceleration</span>
+                  <span class="font-semibold text-white">{{ (metrics?.maxCleanAccelerationMs2 || 0).toFixed(2) }}
+                    m/s²</span>
+                </div>
+                <div class="flex justify-between gap-4 text-(--text-muted)">
+                  <span>Bytes streamed</span>
+                  <span class="font-semibold text-white">{{ formatBytes(bytesRead) }}</span>
+                </div>
+              </div>
+            </UCard>
+
+            <UCard class="glass-card min-h-64">
+              <template #header>
+                <h2 class="card-title">Visualization settings</h2>
+              </template>
+
+              <div class="space-y-4">
+                <div>
+                  <div class="mb-2 flex items-center justify-between text-sm text-(--text-muted)">
+                    <span>Trajectory by</span>
+                    <span class="text-white">speed</span>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <UBadge class="accent-pill">speed</UBadge>
+                  </div>
+                </div>
+
+                <div>
+                  <div class="mb-2 flex items-center justify-between text-sm text-(--text-muted)">
+                    <span>Point reduction</span>
+                  </div>
+                  <USlider v-model="toleranceEpsilon" :min="0" :max="5" :step="0.01"
+                    :disabled="!isWasmReady || isUploading" class="mb-2" />
+                  <div class="flex items-center justify-between text-xs text-(--text-muted)">
+                    <span>{{ toleranceLabel }}</span>
+                  </div>
+                </div>
+              </div>
+            </UCard>
+
+            <UCard class="glass-card min-h-64">
+              <template #header>
+                <h2 class="card-title">AI Insights and Analytics</h2>
+              </template>
+
+              <div class="space-y-3">
+                <UButton size="lg"
+                  class="w-full justify-between! rounded-xl! bg-transparent! text-white! ring-1 ring-white/30 hover:bg-white/10!"
+                  :disabled="!isUploading">
+                  <span>Create an AI flight report</span>
+                  <span>></span>
+                </UButton>
+                <UButton size="lg"
+                  class="w-full justify-between! rounded-xl! bg-transparent! text-white! ring-1 ring-white/30 hover:bg-white/10!"
+                  :disabled="!isUploading">
+                  <span>Mathematical justification</span>
+                  <span>></span>
+                </UButton>
+                <div class="mt-4 flex items-center justify-between text-xs text-(--text-muted)">
+                  <span>Mission conclusion:</span>
+                  <span class="font-semibold" :class="isUploading ? 'text-(--primary-500)' : 'text-(--text-muted)'">
+                    {{ isUploading ? 'Mission successful' : 'Awaiting upload' }}
+                  </span>
+                </div>
+              </div>
+            </UCard>
+          </div>
+          <div class="pointer-events-none absolute inset-x-6 bottom-8 z-20 sm:inset-x-12 lg:inset-x-16">
+            <Transition appear enter-active-class="transition duration-300 ease-out"
+              enter-from-class="opacity-0 translate-y-4 scale-98" enter-to-class="opacity-100 translate-y-0 scale-100"
+              leave-active-class="transition duration-220 ease-in"
+              leave-from-class="opacity-100 translate-y-0 scale-100" leave-to-class="opacity-0 translate-y-3 scale-99">
+              <div v-show="lockOverlayVisible"
+                class="pointer-events-auto rounded-2xl border border-white/15 bg-[rgba(11,18,31,0.74)] px-6 py-8 text-center backdrop-blur-xl">
+                <p class="text-base font-bold text-white sm:text-xl">Upload a log .bin file to unlock analytics</p>
+                <p class="mt-2 text-sm text-(--text-muted)">
+                  The system will automatically decompress GPS and IMU data
+                </p>
+                <UButton class="mt-5 rounded-xl! bg-(--primary-500)! px-8 py-2.5 text-black! hover:bg-(--primary-600)!"
+                  @click="openImportModal">
+                  Upload Log (.bin) file
+                </UButton>
+              </div>
+            </Transition>
+          </div>
+        </section>
+
+        <p v-if="error" class="mt-4 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+          {{ error }}
+        </p>
+      </main>
+
+      <Transition enter-active-class="transition duration-200 ease-out" enter-from-class="opacity-0"
+        enter-to-class="opacity-100" leave-active-class="transition duration-150 ease-in" leave-from-class="opacity-100"
+        leave-to-class="opacity-0">
+        <div v-if="importModalOpen"
+          class="fixed inset-0 z-50 flex items-start justify-center p-4 pt-16 sm:p-8 sm:pt-20">
+          <button class="absolute inset-0 bg-[rgba(5,8,15,0.78)] backdrop-blur-sm" type="button"
+            aria-label="Close import modal" @click="closeImportModal" />
+
+          <UCard class="glass-modal relative z-10 w-full max-w-5xl">
+            <template #header>
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <h2 class="text-3xl font-bold text-white">Import logs</h2>
+                  <p class="mt-1 text-sm text-(--text-muted)">Drag and drop a binary log file or choose from disk</p>
+                </div>
+                <UButton variant="ghost" color="neutral" icon="i-lucide-x" @click="closeImportModal" />
+              </div>
+            </template>
+
+            <div class="space-y-5">
+              <UFileUpload accept=".BIN,.bin,application/octet-stream" :model-value="selectedFile"
+                label="Drop ArduPilot .BIN log" description="ArduPilot .bin files up to 50 MB are supported"
+                class="upload-zone" @update:model-value="onFileChange" />
+              <div class="flex flex-wrap gap-3">
+                <UButton :disabled="!canProcess" :loading="isUploading"
+                  class="rounded-xl! bg-(--primary-500)! px-6 py-2.5 text-black! hover:bg-(--primary-600)!"
+                  @click="processFile">
+                  Parse and visualize
+                </UButton>
+
+                <UButton variant="outline" color="neutral" class="rounded-xl! px-6 py-2.5" @click="closeImportModal">
+                  Close
+                </UButton>
+              </div>
+            </div>
+          </UCard>
+        </div>
+      </Transition>
+    </div>
   </ClientOnly>
 </template>

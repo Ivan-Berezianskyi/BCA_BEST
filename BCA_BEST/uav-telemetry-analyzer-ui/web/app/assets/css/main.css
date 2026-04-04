@@ -1,2 +1,197 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap');
 @import "tailwindcss";
 @import "@nuxt/ui";
+
+:root {
+	--primary-500: #a3e653;
+	--primary-600: #7fcf0e;
+	--neutral-950: #04070f;
+	--panel-bg: rgba(15, 23, 37, 0.72);
+	--panel-border: rgba(219, 232, 255, 0.14);
+	--panel-shadow: 0 22px 56px rgba(4, 9, 20, 0.58);
+	--text-muted: rgba(225, 234, 255, 0.62);
+}
+
+html,
+body,
+#__nuxt {
+	min-height: 100%;
+}
+
+body {
+	margin: 0;
+	font-family: 'Manrope', sans-serif;
+	background: radial-gradient(circle at 20% 0%, rgba(29, 50, 110, 0.32), transparent 42%),
+		radial-gradient(circle at 80% 12%, rgba(22, 72, 145, 0.24), transparent 36%),
+		var(--neutral-950);
+	color: #f8fbff;
+}
+
+.dashboard-shell {
+	position: relative;
+	min-height: 100vh;
+	overflow: hidden;
+	isolation: isolate;
+}
+
+.dashboard-shell::before {
+	content: '';
+	position: absolute;
+	inset: 0;
+	z-index: -2;
+	background: radial-gradient(circle at 18% 26%, rgba(59, 84, 172, 0.22), transparent 30%),
+		radial-gradient(circle at 82% 8%, rgba(17, 92, 166, 0.24), transparent 34%),
+		linear-gradient(170deg, rgba(6, 11, 22, 0.98), rgba(5, 9, 18, 0.98));
+}
+
+.dashboard-shell::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	z-index: -1;
+	background-image: radial-gradient(rgba(165, 184, 255, 0.16) 0.8px, transparent 0.8px);
+	background-size: 4px 4px;
+	opacity: 0.07;
+	pointer-events: none;
+}
+
+.glass-stage {
+	background: rgba(7, 12, 24, 0.72);
+	box-shadow: var(--panel-shadow);
+}
+
+.glass-card {
+	border: 1px solid var(--panel-border);
+	border-radius: 1.1rem;
+	background: var(--panel-bg);
+	box-shadow: var(--panel-shadow);
+	backdrop-filter: blur(18px);
+	-webkit-backdrop-filter: blur(18px);
+}
+
+.glass-modal {
+	border: 1px solid rgba(225, 234, 255, 0.18);
+	border-radius: 1.25rem;
+	background: rgba(13, 20, 33, 0.93);
+	box-shadow: 0 26px 72px rgba(0, 0, 0, 0.62);
+	backdrop-filter: blur(20px);
+	-webkit-backdrop-filter: blur(20px);
+}
+
+.card-title {
+	font-size: 1.2rem;
+	line-height: 1.25;
+	font-weight: 700;
+	color: #f8fbff;
+}
+
+.data-muted {
+	color: var(--text-muted);
+}
+
+.brand-chip {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 2.25rem;
+	width: 2.25rem;
+	border-radius: 999px;
+	background: rgba(163, 230, 83, 0.2);
+	border: 1px solid rgba(163, 230, 83, 0.65);
+	color: var(--primary-500);
+	font-size: 0.8rem;
+	font-weight: 800;
+}
+
+.team-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.6rem;
+	border-radius: 999px;
+	border: 1px solid rgba(220, 232, 255, 0.16);
+	background: rgba(17, 26, 42, 0.78);
+	padding: 0.45rem 0.8rem;
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+	backdrop-filter: blur(10px);
+	-webkit-backdrop-filter: blur(10px);
+}
+
+.nav-chip {
+	border-radius: 999px;
+	border: 1px solid rgba(225, 234, 255, 0.28);
+	background: rgba(34, 46, 65, 0.6);
+	color: rgba(236, 241, 255, 0.78);
+	font-size: 0.9rem;
+	font-weight: 600;
+	line-height: 1;
+	padding: 0.65rem 1.1rem;
+	transition: transform 0.18s ease, border-color 0.18s ease, color 0.18s ease, background-color 0.18s ease;
+}
+
+.nav-chip:hover {
+	transform: translateY(-1px);
+	border-color: rgba(225, 234, 255, 0.44);
+	color: #ffffff;
+}
+
+.nav-chip--active {
+	border-color: rgba(163, 230, 83, 0.85);
+	background: var(--primary-500);
+	color: #111827;
+}
+
+.glass-chip {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	border: 1px solid rgba(225, 234, 255, 0.24);
+	background: rgba(30, 42, 60, 0.74);
+	color: rgba(237, 243, 255, 0.76);
+	font-size: 0.76rem;
+	font-weight: 700;
+	line-height: 1;
+	padding: 0.35rem 0.72rem;
+}
+
+.accent-pill {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	border: 1px solid rgba(163, 230, 83, 0.74);
+	background: rgba(163, 230, 83, 0.2);
+	color: var(--primary-500);
+	font-size: 0.76rem;
+	font-weight: 800;
+	line-height: 1;
+	padding: 0.35rem 0.72rem;
+}
+
+.status-track {
+	width: 100%;
+	height: 0.42rem;
+	border-radius: 999px;
+	background: rgba(84, 104, 142, 0.34);
+	overflow: hidden;
+}
+
+.status-fill {
+	height: 100%;
+	border-radius: inherit;
+	background: linear-gradient(90deg, #6eac13 0%, #a3e653 100%);
+	transition: width 0.22s ease;
+}
+
+.upload-zone {
+	border-radius: 1rem;
+	border: 1px dashed rgba(163, 230, 83, 0.6);
+	background: rgba(33, 46, 66, 0.4);
+	padding: 0.35rem;
+}
+
+@media (max-width: 1024px) {
+	.team-pill {
+		align-self: flex-start;
+	}
+}
