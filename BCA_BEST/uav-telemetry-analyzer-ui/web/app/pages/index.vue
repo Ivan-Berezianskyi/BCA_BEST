@@ -311,7 +311,7 @@ onMounted(async () => {
               <div class="flex items-center justify-between gap-3">
                 <div>
                   <h2 class="text-3xl font-bold text-white">Import logs</h2>
-                  <p class="mt-1 text-sm text-(--text-muted)">Drag and drop a binary log file or choose from disk</p>
+                  <p class="mt-1 text-sm text-(--text-muted)">Upload a binary log file or choose from disk</p>
                 </div>
                 <UButton variant="ghost" color="neutral" icon="i-lucide-x" @click="closeImportModal" />
               </div>
@@ -319,7 +319,7 @@ onMounted(async () => {
 
             <div class="space-y-5">
               <UFileUpload accept=".BIN,.bin,application/octet-stream" :model-value="selectedFile"
-                label="Drop ArduPilot .BIN log" description="ArduPilot .bin files up to 50 MB are supported"
+                label="Upload ArduPilot .BIN log" description="ArduPilot .bin files up to 50 MB are supported"
                 class="upload-zone" @update:model-value="onFileChange" />
               <div class="flex flex-wrap gap-3">
                 <UButton :disabled="!canProcess" :loading="isUploading"
