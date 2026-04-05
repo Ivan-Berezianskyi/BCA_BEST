@@ -122,7 +122,6 @@ class TelemetryAnalytics:
         
         mask = (lat_diff < 0.005) & (lon_diff < 0.005)
         
-        old_len = len(self.pos_data)
         self.pos_data = self.pos_data[mask].reset_index(drop=True)
 
     #filters bad records by mesuring speed
@@ -137,7 +136,6 @@ class TelemetryAnalytics:
         mask = (speed < max_speed_ms) | (dt > 2.0)
         mask = mask.fillna(True)
 
-        old_len = len(self.pos_data)
         self.pos_data = self.pos_data[mask].reset_index(drop=True)
     
     def _create_enu_cords(self):
