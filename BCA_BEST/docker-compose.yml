@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  uav-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: uav-telemetry-analyzer
+    ports:
+      - "8000:8000"
+    environment:
+      # AI API Key for flight analysis (optional - has default fallback)
+      # Set your OpenAI API key via: export AI_API_KEY=sk-...
+      - AI_API_KEY=${AI_API_KEY:-your-openai-key-here}
+    volumes:
+      # Persist uploaded telemetry data
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - uav-network
+
+networks:
+  uav-network:
+    driver: bridge
