@@ -44,15 +44,13 @@ function closeImportModal() {
   importModalOpen.value = false
 }
 
-function onFileChange(value: File | null | File[] | undefined) {
-  selectedFile.value = Array.isArray(value) ? (value[0] ?? null) : (value ?? null)
-
-  if (selectedFile.value) {
+watch(selectedFile, (file) => {
+  if (file) {
     progressLabel.value = 'File selected. Ready to upload'
-  } else {
+  } else if (!isUploading.value) {
     progressLabel.value = 'Awaiting binary input'
   }
-}
+})
 
 async function processFile() {
   if (!selectedFile.value || isUploading.value) return
@@ -225,16 +223,6 @@ onMounted(async () => {
               <div class="space-y-4">
                 <div>
                   <div class="mb-2 flex items-center justify-between text-sm text-(--text-muted)">
-                    <span>Trajectory by</span>
-                    <span class="text-white">speed</span>
-                  </div>
-                  <div class="flex flex-wrap gap-2">
-                    <UBadge class="accent-pill">speed</UBadge>
-                  </div>
-                </div>
-
-                <div>
-                  <div class="mb-2 flex items-center justify-between text-sm text-(--text-muted)">
                     <span>Point reduction</span>
                   </div>
                   <USlider v-model="toleranceEpsilon" :min="0" :max="5" :step="0.01"
@@ -318,9 +306,9 @@ onMounted(async () => {
             </template>
 
             <div class="space-y-5">
-              <UFileUpload accept=".BIN,.bin,application/octet-stream" :model-value="selectedFile"
+              <UFileUpload v-model="selectedFile" accept=".BIN,.bin,application/octet-stream" reset
                 label="Upload ArduPilot .BIN log" description="ArduPilot .bin files up to 50 MB are supported"
-                class="upload-zone" @update:model-value="onFileChange" />
+                class="upload-zone min-h-48 w-full" />
               <div class="flex flex-wrap gap-3">
                 <UButton :disabled="!canProcess" :loading="isUploading"
                   class="rounded-xl! bg-(--primary-500)! px-6 py-2.5 text-black! hover:bg-(--primary-600)!"
