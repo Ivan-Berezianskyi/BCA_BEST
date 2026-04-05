@@ -1,0 +1,61 @@
+# Version control
+.git/
+.gitignore
+
+# Python
+uav-telemetry-analyzer/venv/
+uav-telemetry-analyzer/**/__pycache__/
+uav-telemetry-analyzer/**/*.pyc
+uav-telemetry-analyzer/**/*.pyo
+uav-telemetry-analyzer/**/*.pyd
+uav-telemetry-analyzer/.pytest_cache/
+
+# Node.js
+uav-telemetry-analyzer-ui/**/node_modules/
+uav-telemetry-analyzer-ui/web/.output/
+uav-telemetry-analyzer-ui/web/.nuxt/
+uav-telemetry-analyzer-ui/**/package-lock.json
+uav-telemetry-analyzer-ui/**/bun.lock
+
+# Rust
+uav-telemetry-analyzer-ui/cords-optimizator/target/
+uav-telemetry-analyzer-ui/cords-optimizator/pkg/
+uav-telemetry-analyzer-ui/cords-optimizator/Cargo.lock
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.iml
+
+# Documentation (will be excluded from build, but present in repo)
+*.md
+!uav-telemetry-analyzer/README.md
+
+# Docker artifacts
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Data and logs
+data/
+*.bin
+*.log
+*.BIN
+*.LOG
+
+# CI/CD
+.github/
+
+# Temp files
+*.tmp
+*.temp
+.env.local
+.env.*.local
+
+# Claude plans (from development)
+.claude/
